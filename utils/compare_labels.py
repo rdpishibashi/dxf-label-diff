@@ -96,37 +96,87 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
                 rounded_y = round_coordinate(y, coordinate_tolerance)
                 rounded_labels_b.append((label, rounded_x, rounded_y))
 
-            # 出現回数をカウント
+            # 出現回数をカウント（座標込み）
             counter_a = Counter(rounded_labels_a)
             counter_b = Counter(rounded_labels_b)
 
-            # すべてのユニークなラベル（座標込み）を取得
-            all_label_tuples = sorted(set(list(counter_a.keys()) + list(counter_b.keys())), key=lambda x: x[0])
+            # 集合として差分を計算
+            set_a = set(counter_a.keys())
+            set_b = set(counter_b.keys())
+
+            # ラベル名ごとに集約
+            label_summary = {}
+
+            # A only, B only, Common を分類
+            a_only_tuples = set_a - set_b
+            b_only_tuples = set_b - set_a
+            common_tuples = set_a & set_b
+
+            # 各タプルをラベル名で集約
+            for label_tuple in a_only_tuples:
+                label = label_tuple[0]
+                count = counter_a[label_tuple]
+                if label not in label_summary:
+                    label_summary[label] = {'a_only': 0, 'b_only': 0, 'common': 0}
+                label_summary[label]['a_only'] += count
+
+            for label_tuple in b_only_tuples:
+                label = label_tuple[0]
+                count = counter_b[label_tuple]
+                if label not in label_summary:
+                    label_summary[label] = {'a_only': 0, 'b_only': 0, 'common': 0}
+                label_summary[label]['b_only'] += count
+
+            for label_tuple in common_tuples:
+                label = label_tuple[0]
+                count_a = counter_a[label_tuple]
+                count_b = counter_b[label_tuple]
+                if label not in label_summary:
+                    label_summary[label] = {'a_only': 0, 'b_only': 0, 'common': 0}
+                # 共通部分は少ない方をカウント
+                common_count = min(count_a, count_b)
+                label_summary[label]['common'] += common_count
+                # 差分があればa_onlyまたはb_onlyに加算
+                if count_a > count_b:
+                    label_summary[label]['a_only'] += (count_a - count_b)
+                elif count_b > count_a:
+                    label_summary[label]['b_only'] += (count_b - count_a)
 
             # データフレーム用のデータを作成
             data_rows = []
 
-            for label_tuple in all_label_tuples:
-                count_a = counter_a.get(label_tuple, 0)
-                count_b = counter_b.get(label_tuple, 0)
+            for label in sorted(label_summary.keys()):
+                summary = label_summary[label]
 
-                # ステータスを判定
-                if count_a > 0 and count_b == 0:
-                    status = 'A Only'
-                elif count_a == 0 and count_b > 0:
-                    status = 'B Only'
-                elif count_a != count_b:
-                    status = 'Different'
-                else:
-                    status = 'Same'
+                # A only の部分を出力
+                if summary['a_only'] > 0:
+                    data_rows.append({
+                        'Label': label,
+                        file_a_name: summary['a_only'],
+                        file_b_name: 0,
+                        'Status': 'A Only',
+                        'Diff (B-A)': -summary['a_only']
+                    })
 
-                data_rows.append({
-                    'Label': label_tuple[0],  # ラベルのみ表示
-                    file_a_name: count_a,
-                    file_b_name: count_b,
-                    'Status': status,
-                    'Diff (B-A)': count_b - count_a
-                })
+                # B only の部分を出力
+                if summary['b_only'] > 0:
+                    data_rows.append({
+                        'Label': label,
+                        file_a_name: 0,
+                        file_b_name: summary['b_only'],
+                        'Status': 'B Only',
+                        'Diff (B-A)': summary['b_only']
+                    })
+
+                # Common の部分を出力
+                if summary['common'] > 0:
+                    data_rows.append({
+                        'Label': label,
+                        file_a_name: summary['common'],
+                        file_b_name: summary['common'],
+                        'Status': 'Same',
+                        'Diff (B-A)': 0
+                    })
 
             # データフレームを作成
             df = pd.DataFrame(data_rows)
@@ -244,14 +294,18 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
         # 個別シートにサマリー情報を追加
         if compare_with_coordinates:
             # 座標比較モードの場合
+            # ユニークなラベル名の数を計算
+            unique_labels_a = len(set([label for label, x, y in labels_a]))
+            unique_labels_b = len(set([label for label, x, y in labels_b]))
+
             sheet_summary = [
-                [f"ファイルA: {file_a_name}", f"ラベル総数: {len(labels_a)}", f"ユニークラベル数（座標込み）: {len(counter_a)}"],
-                [f"ファイルB: {file_b_name}", f"ラベル総数: {len(labels_b)}", f"ユニークラベル数（座標込み）: {len(counter_b)}"],
+                [f"ファイルA: {file_a_name}", f"ラベル総数: {len(labels_a)}", f"ユニークラベル名数: {unique_labels_a}"],
+                [f"ファイルB: {file_b_name}", f"ラベル総数: {len(labels_b)}", f"ユニークラベル名数: {unique_labels_b}"],
                 ["", "", ""],
                 ["差分サマリー:", "", ""],
                 [f"Aのみのラベル: {sum(1 for s in df['Status'] if s == 'A Only')}",
                  f"Bのみのラベル: {sum(1 for s in df['Status'] if s == 'B Only')}",
-                 f"異なる個数のラベル: {sum(1 for s in df['Status'] if s == 'Different')}"]
+                 f"完全一致のラベル: {sum(1 for s in df['Status'] if s == 'Same')}"]
             ]
             total_labels_count = len(df)
         else:
