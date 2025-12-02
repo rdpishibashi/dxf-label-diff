@@ -112,15 +112,15 @@ def app():
     # オプション設定
     with st.expander("オプション設定", expanded=False):
         col1, col2 = st.columns(2)
-        
+
         with col1:
             filter_option = st.checkbox(
-                "機器符号（候補）のみ抽出", 
-                value=False, 
+                "機器符号（候補）のみ抽出",
+                value=False,
                 help="以下のパターンに一致するラベルのみを機器符号として抽出します："
                      "\n\n【基本パターン】"
                      "\n• 英文字のみ: CNCNT, FB"
-                     "\n• 英文字+数字: R10, CN3, PSW1"  
+                     "\n• 英文字+数字: R10, CN3, PSW1"
                      "\n• 英文字+数字+英文字: X14A, RMSS2A"
                      "\n\n【括弧付きパターン】"
                      "\n• 英文字(補足): FB(), MSS(MOTOR)"
@@ -128,16 +128,40 @@ def app():
                      "\n• 英文字+数字+英文字(補足): U23B(DAC)"
                      "\n\n※英文字だけの場合は英文字2個以上、それ以外の場合は英文字1個以上、数字1個以上必要です"
             )
-            
+
             # 機器符号妥当性チェックオプション（機器符号フィルタリングが有効な場合のみ表示）
             validate_ref_designators = False
             if filter_option:
                 validate_ref_designators = st.checkbox(
-                    "機器符号妥当性チェック", 
+                    "機器符号妥当性チェック",
                     value=False,
                     help="抽出された機器符号がフォーマットに適合するかチェックします。"
                          "\n適合しない機器符号のリストを別シートに出力します。"
                          "\n（例：CBnnn, ELB(CB) nnn, R, Annn等の標準フォーマット）"
+                )
+
+            # 座標も含めて比較オプション
+            compare_with_coordinates = st.checkbox(
+                "座標も含めて比較",
+                value=False,
+                help="ラベルだけでなく座標も含めて比較します。"
+                     "\n同じラベルでも座標が異なる場合は別の項目として扱われます。"
+                     "\n座標比較精度で指定した範囲内であれば同じ座標として扱われます。"
+            )
+
+            # 座標比較精度の設定（座標比較が有効な場合のみ表示）
+            coordinate_tolerance = 0.01
+            if compare_with_coordinates:
+                coordinate_tolerance = st.number_input(
+                    "座標比較精度",
+                    min_value=0.0001,
+                    max_value=1.0,
+                    value=0.01,
+                    step=0.001,
+                    format="%.4f",
+                    help="座標の許容誤差を指定します。"
+                         "\nこの値の範囲内であれば同じ座標として扱われます。"
+                         "\n例：0.01の場合、座標差が0.01以内なら同じとみなされます。"
                 )
         
         with col2:
@@ -183,16 +207,20 @@ def app():
                         temp_file_pairs,
                         filter_non_parts=filter_option,
                         sort_order=sort_value,
-                        validate_ref_designators=validate_ref_designators
+                        validate_ref_designators=validate_ref_designators,
+                        compare_with_coordinates=compare_with_coordinates,
+                        coordinate_tolerance=coordinate_tolerance
                     )
-                    
+
                     # 結果をセッション状態に保存
                     st.session_state.excel_result = excel_data
                     st.session_state.output_filename = output_filename
                     st.session_state.processing_settings = {
                         'filter_option': filter_option,
                         'validate_ref_designators': validate_ref_designators,
-                        'sort_order': sort_value
+                        'sort_order': sort_value,
+                        'compare_with_coordinates': compare_with_coordinates,
+                        'coordinate_tolerance': coordinate_tolerance
                     }
                     
                 # 一時ファイルの削除
@@ -218,9 +246,12 @@ def app():
                 option_info.append("機器符号フィルタリング: 有効")
                 if settings.get('validate_ref_designators'):
                     option_info.append("機器符号妥当性チェック: 有効")
+            if settings.get('compare_with_coordinates'):
+                tolerance = settings.get('coordinate_tolerance', 0.01)
+                option_info.append(f"座標も含めて比較: 有効（精度: {tolerance:.4f}）")
             sort_labels = {'asc': '昇順', 'desc': '降順', 'none': 'なし'}
             option_info.append(f"並び替え: {sort_labels.get(settings.get('sort_order', 'asc'))}")
-            
+
             if option_info:
                 st.info("処理オプション: " + " | ".join(option_info))
             

@@ -239,12 +239,12 @@ def determine_drawing_number_types(drawing_numbers: List[Tuple[str, Tuple[float,
     return {'main_drawing': main_drawing, 'source_drawing': source_drawing}
 
 
-def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=False, 
-                  selected_layers=None, validate_ref_designators=False, 
-                  extract_drawing_numbers_option=False):
+def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=False,
+                  selected_layers=None, validate_ref_designators=False,
+                  extract_drawing_numbers_option=False, include_coordinates=False):
     """
     DXFファイルからテキストラベルを抽出する
-    
+
     Args:
         dxf_file: DXFファイルパス
         filter_non_parts: 回路記号以外のラベルをフィルタリングするかどうか
@@ -253,9 +253,10 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         selected_layers: 処理対象とするレイヤー名のリスト。Noneの場合は全レイヤーを対象とする
         validate_ref_designators: 回路記号の妥当性をチェックするかどうか
         extract_drawing_numbers_option: 図面番号を抽出するかどうか
-        
+        include_coordinates: Trueの場合、(ラベル, X座標, Y座標)のタプルを返す
+
     Returns:
-        tuple: (ラベルリスト, 情報辞書)
+        tuple: (ラベルリスト または (ラベル, X, Y)タプルのリスト, 情報辞書)
     """
     # 処理情報を格納する辞書
     info = {
@@ -316,40 +317,32 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         
         # 4. INSERT エンティティを処理してブロック参照を展開
         try:
-            # ブロック定義内のテキストエンティティをキャッシュ
-            block_text_cache = {}
-            for block in doc.blocks:
-                block_texts = []
-                for entity in block:
-                    if entity.dxftype() in ['TEXT', 'MTEXT']:
-                        block_texts.append(entity)
-                if block_texts:
-                    block_text_cache[block.name] = block_texts
-            
-            # INSERT エンティティを処理
+            # INSERT エンティティを処理（MODEL_SPACE）
             for e in msp:
                 if e.dxftype() == 'INSERT':
-                    # INSERT エンティティのブロック名を取得
-                    block_name = e.dxf.name
-                    
-                    # そのブロック内のテキストエンティティを取得
-                    if block_name in block_text_cache:
-                        for text_entity in block_text_cache[block_name]:
-                            # INSERT エンティティのレイヤーをチェック
-                            if e.dxf.layer in selected_layers:
-                                all_entities_to_process.append(text_entity)
-                    
+                    # INSERT エンティティのレイヤーをチェック
+                    if e.dxf.layer in selected_layers:
+                        # virtual_entities()を使ってINSERTを展開（座標変換済み）
+                        try:
+                            for virtual_entity in e.virtual_entities():
+                                if virtual_entity.dxftype() in ['TEXT', 'MTEXT']:
+                                    all_entities_to_process.append(virtual_entity)
+                        except Exception:
+                            pass  # 展開できない場合は無視
+
             # ペーパースペースの INSERT エンティティも処理
             for layout in doc.layouts:
                 if layout.name != 'Model':
                     for e in layout:
                         if e.dxftype() == 'INSERT':
-                            block_name = e.dxf.name
-                            if block_name in block_text_cache:
-                                for text_entity in block_text_cache[block_name]:
-                                    if e.dxf.layer in selected_layers:
-                                        all_entities_to_process.append(text_entity)
-                        
+                            if e.dxf.layer in selected_layers:
+                                try:
+                                    for virtual_entity in e.virtual_entities():
+                                        if virtual_entity.dxftype() in ['TEXT', 'MTEXT']:
+                                            all_entities_to_process.append(virtual_entity)
+                                except Exception:
+                                    pass
+
         except Exception as e:
             pass  # INSERT処理エラーは無視して続行
         
@@ -375,10 +368,14 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
                         drawing_numbers = extract_drawing_numbers(clean_text, debug)
                         for dn in drawing_numbers:
                             drawing_number_candidates.append((dn, coordinates))
-                            
-                    
+
+
                     # 通常のラベルとして追加（クリーンテキストを使用）
-                    labels.append(clean_text)
+                    # 座標を含めるオプションが有効な場合は(ラベル, X, Y)のタプルで追加
+                    if include_coordinates:
+                        labels.append((clean_text, coordinates[0], coordinates[1]))
+                    else:
+                        labels.append(clean_text)
         
         # 総抽出数を記録
         info["total_extracted"] = len(labels)
@@ -390,27 +387,55 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
             info["source_drawing_number"] = drawing_info['source_drawing']
             info["all_drawing_numbers"] = [dn[0] for dn in drawing_number_candidates]
             
-        
-        
+
+
         # 回路記号処理（フィルタリング、妥当性チェック）
-        symbol_result = process_circuit_symbol_labels(
-            labels,
-            filter_non_parts=filter_non_parts,
-            validate_ref_designators=validate_ref_designators,
-            debug=debug
-        )
-        
-        # 処理結果を取得
-        processed_labels = symbol_result['labels']
-        info["filtered_count"] = symbol_result['filtered_count']
-        info["invalid_ref_designators"] = symbol_result['invalid_ref_designators']
-        
-        # ソート
-        if sort_order == "asc":
-            processed_labels.sort()
-        elif sort_order == "desc":
-            processed_labels.sort(reverse=True)
-        final_labels = processed_labels
+        # 座標付きの場合は、ラベル部分のみを抽出してフィルタリング処理を行う
+        if include_coordinates:
+            # (ラベル, X, Y)タプルから、ラベルのみを抽出
+            labels_only = [label_tuple[0] for label_tuple in labels]
+            symbol_result = process_circuit_symbol_labels(
+                labels_only,
+                filter_non_parts=filter_non_parts,
+                validate_ref_designators=validate_ref_designators,
+                debug=debug
+            )
+
+            # フィルタリング後のラベルセットを作成
+            filtered_label_set = set(symbol_result['labels'])
+
+            # 元の(ラベル, X, Y)タプルから、フィルタリング後のラベルのみを保持
+            processed_labels = [lt for lt in labels if lt[0] in filtered_label_set]
+
+            info["filtered_count"] = symbol_result['filtered_count']
+            info["invalid_ref_designators"] = symbol_result['invalid_ref_designators']
+
+            # ソート（座標付きの場合は、ラベル→X座標→Y座標の順でソート）
+            if sort_order == "asc":
+                processed_labels.sort(key=lambda x: (x[0], x[1], x[2]))
+            elif sort_order == "desc":
+                processed_labels.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+            final_labels = processed_labels
+        else:
+            # 座標なしの従来の処理
+            symbol_result = process_circuit_symbol_labels(
+                labels,
+                filter_non_parts=filter_non_parts,
+                validate_ref_designators=validate_ref_designators,
+                debug=debug
+            )
+
+            # 処理結果を取得
+            processed_labels = symbol_result['labels']
+            info["filtered_count"] = symbol_result['filtered_count']
+            info["invalid_ref_designators"] = symbol_result['invalid_ref_designators']
+
+            # ソート
+            if sort_order == "asc":
+                processed_labels.sort()
+            elif sort_order == "desc":
+                processed_labels.sort(reverse=True)
+            final_labels = processed_labels
         
         # 最終的なラベル数を記録
         info["final_count"] = len(final_labels)
@@ -423,12 +448,12 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         return [], info
 
 
-def process_multiple_dxf_files(dxf_files, filter_non_parts=False, sort_order="asc", debug=False, 
+def process_multiple_dxf_files(dxf_files, filter_non_parts=False, sort_order="asc", debug=False,
                               selected_layers=None, validate_ref_designators=False,
-                              extract_drawing_numbers_option=False):
+                              extract_drawing_numbers_option=False, include_coordinates=False):
     """
     複数のDXFファイルからラベルを抽出する
-    
+
     Args:
         dxf_files: DXFファイルパスのリスト
         filter_non_parts: 回路記号以外のラベルをフィルタリングするかどうか
@@ -437,7 +462,8 @@ def process_multiple_dxf_files(dxf_files, filter_non_parts=False, sort_order="as
         selected_layers: 処理対象とするレイヤー名のリスト。Noneの場合は全レイヤーを対象とする
         validate_ref_designators: 回路記号の妥当性をチェックするかどうか
         extract_drawing_numbers_option: 図面番号を抽出するかどうか
-        
+        include_coordinates: Trueの場合、(ラベル, X座標, Y座標)のタプルを返す
+
     Returns:
         dict: ファイルパスをキー、(ラベルリスト, 情報辞書)をバリューとする辞書
     """
@@ -451,18 +477,18 @@ def process_multiple_dxf_files(dxf_files, filter_non_parts=False, sort_order="as
                     if file.lower().endswith('.dxf'):
                         file_path = os.path.join(root, file)
                         labels, info = extract_labels(
-                            file_path, filter_non_parts, sort_order, debug, 
+                            file_path, filter_non_parts, sort_order, debug,
                             selected_layers, validate_ref_designators,
-                            extract_drawing_numbers_option
+                            extract_drawing_numbers_option, include_coordinates
                         )
                         results[file_path] = (labels, info)
         # 単一のDXFファイルの場合
         elif os.path.isfile(dxf_file) and dxf_file.lower().endswith('.dxf'):
             labels, info = extract_labels(
-                dxf_file, filter_non_parts, sort_order, debug, 
+                dxf_file, filter_non_parts, sort_order, debug,
                 selected_layers, validate_ref_designators,
-                extract_drawing_numbers_option
+                extract_drawing_numbers_option, include_coordinates
             )
             results[dxf_file] = (labels, info)
-    
+
     return results

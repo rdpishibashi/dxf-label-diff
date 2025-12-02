@@ -8,10 +8,25 @@ import sys
 from .common_utils import process_circuit_symbol_labels
 from .extract_labels import extract_labels
 
-def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", validate_ref_designators=False):
+
+def round_coordinate(value, tolerance):
+    """
+    座標値を許容誤差に基づいて丸める
+
+    Args:
+        value: 座標値
+        tolerance: 許容誤差
+
+    Returns:
+        float: 丸められた座標値
+    """
+    return round(value / tolerance) * tolerance
+
+
+def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", validate_ref_designators=False, compare_with_coordinates=False, coordinate_tolerance=0.01):
     """
     複数のDXFファイルペアのラベル比較結果をExcelとして出力する
-    
+
     Args:
         file_pairs: ファイルペアのリスト[(file_a, file_b, temp_file_a, temp_file_b, pair_name), ...]
           - file_a, file_b: 元のアップロードファイルオブジェクト
@@ -20,7 +35,9 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
         filter_non_parts: 回路記号（候補）のみを抽出するかどうか
         sort_order: ソート順（"asc"=昇順, "desc"=降順, "none"=ソートなし）
         validate_ref_designators: 回路記号の妥当性をチェックするかどうか
-        
+        compare_with_coordinates: 座標も含めて比較するかどうか
+        coordinate_tolerance: 座標比較の許容誤差（デフォルト: 0.01）
+
     Returns:
         bytes: 生成されたExcelファイルのバイナリデータ
     """
@@ -35,31 +52,26 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
     for idx, (file_a, file_b, temp_file_a, temp_file_b, pair_name) in enumerate(file_pairs):
         # ラベルを抽出（extract_labelsを再利用）- 一時ファイルパスを使用
         labels_a, info_a = extract_labels(
-            temp_file_a, 
-            filter_non_parts=filter_non_parts, 
+            temp_file_a,
+            filter_non_parts=filter_non_parts,
             sort_order=sort_order,
-            validate_ref_designators=validate_ref_designators
+            validate_ref_designators=validate_ref_designators,
+            include_coordinates=compare_with_coordinates
         )
         labels_b, info_b = extract_labels(
-            temp_file_b, 
-            filter_non_parts=filter_non_parts, 
+            temp_file_b,
+            filter_non_parts=filter_non_parts,
             sort_order=sort_order,
-            validate_ref_designators=validate_ref_designators
+            validate_ref_designators=validate_ref_designators,
+            include_coordinates=compare_with_coordinates
         )
-        
-        # ラベルの出現回数をカウント
-        counter_a = Counter(labels_a)
-        counter_b = Counter(labels_b)
-        
-        # すべてのユニークなラベルを取得
-        all_labels = sorted(set(list(counter_a.keys()) + list(counter_b.keys())))
         
         # 元のアップロードファイル名を使用（UploadedFileオブジェクトから）
         file_a_base = os.path.splitext(file_a.name)[0]
         file_b_base = os.path.splitext(file_b.name)[0]
         file_a_name = f"A:{file_a_base}"
         file_b_name = f"B:{file_b_base}"
-        
+
         # シート名を決定（最大31文字）
         if pair_name:
             # カスタム名がある場合
@@ -67,24 +79,83 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
         else:
             # ファイル名からシート名を生成
             sheet_name = f"Pair{idx+1}"[:31]
-            
-        # データフレームの作成
-        df = pd.DataFrame({
-            'Label': all_labels,
-            file_a_name: [counter_a.get(label, 0) for label in all_labels],
-            file_b_name: [counter_b.get(label, 0) for label in all_labels]
-        })
-        
-        # ラベルがファイルAにのみ存在する（Aのみ）、ファイルBにのみ存在する（Bのみ）、
-        # または両方に存在するが異なる回数（差異あり）、完全に一致（完全一致）を示す列を追加
-        df['Status'] = df.apply(lambda row: 
-            'A Only' if row[file_a_name] > 0 and row[file_b_name] == 0 else
-            'B Only' if row[file_a_name] == 0 and row[file_b_name] > 0 else
-            'Different' if row[file_a_name] != row[file_b_name] else
-            'Same', axis=1)
-        
-        # 差分情報の列を追加（B - A）
-        df['Diff (B-A)'] = df[file_b_name] - df[file_a_name]
+
+        # 座標比較モードと従来モードで処理を分岐
+        if compare_with_coordinates:
+            # 座標比較モード：(ラベル, X, Y)のタプルをキーとして比較
+            # 座標を許容誤差に基づいて丸める
+            rounded_labels_a = []
+            for label, x, y in labels_a:
+                rounded_x = round_coordinate(x, coordinate_tolerance)
+                rounded_y = round_coordinate(y, coordinate_tolerance)
+                rounded_labels_a.append((label, rounded_x, rounded_y))
+
+            rounded_labels_b = []
+            for label, x, y in labels_b:
+                rounded_x = round_coordinate(x, coordinate_tolerance)
+                rounded_y = round_coordinate(y, coordinate_tolerance)
+                rounded_labels_b.append((label, rounded_x, rounded_y))
+
+            # 出現回数をカウント
+            counter_a = Counter(rounded_labels_a)
+            counter_b = Counter(rounded_labels_b)
+
+            # すべてのユニークなラベル（座標込み）を取得
+            all_label_tuples = sorted(set(list(counter_a.keys()) + list(counter_b.keys())), key=lambda x: x[0])
+
+            # データフレーム用のデータを作成
+            data_rows = []
+
+            for label_tuple in all_label_tuples:
+                count_a = counter_a.get(label_tuple, 0)
+                count_b = counter_b.get(label_tuple, 0)
+
+                # ステータスを判定
+                if count_a > 0 and count_b == 0:
+                    status = 'A Only'
+                elif count_a == 0 and count_b > 0:
+                    status = 'B Only'
+                elif count_a != count_b:
+                    status = 'Different'
+                else:
+                    status = 'Same'
+
+                data_rows.append({
+                    'Label': label_tuple[0],  # ラベルのみ表示
+                    file_a_name: count_a,
+                    file_b_name: count_b,
+                    'Status': status,
+                    'Diff (B-A)': count_b - count_a
+                })
+
+            # データフレームを作成
+            df = pd.DataFrame(data_rows)
+
+        else:
+            # 従来モード：ラベルの出現回数をカウント
+            counter_a = Counter(labels_a)
+            counter_b = Counter(labels_b)
+
+            # すべてのユニークなラベルを取得
+            all_labels = sorted(set(list(counter_a.keys()) + list(counter_b.keys())))
+
+            # データフレームの作成
+            df = pd.DataFrame({
+                'Label': all_labels,
+                file_a_name: [counter_a.get(label, 0) for label in all_labels],
+                file_b_name: [counter_b.get(label, 0) for label in all_labels]
+            })
+
+            # ラベルがファイルAにのみ存在する（Aのみ）、ファイルBにのみ存在する（Bのみ）、
+            # または両方に存在するが異なる回数（差異あり）、完全に一致（完全一致）を示す列を追加
+            df['Status'] = df.apply(lambda row:
+                'A Only' if row[file_a_name] > 0 and row[file_b_name] == 0 else
+                'B Only' if row[file_a_name] == 0 and row[file_b_name] > 0 else
+                'Different' if row[file_a_name] != row[file_b_name] else
+                'Same', axis=1)
+
+            # 差分情報の列を追加（B - A）
+            df['Diff (B-A)'] = df[file_b_name] - df[file_a_name]
         
         # データフレームをExcelシートに出力
         df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -171,20 +242,35 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
                     validation_worksheet.write(0, col_num, value, format_header)
         
         # 個別シートにサマリー情報を追加
-        sheet_summary = [
-            [f"ファイルA: {file_a_name}", f"ラベル総数: {len(labels_a)}", f"ユニークラベル数: {len(counter_a)}"],
-            [f"ファイルB: {file_b_name}", f"ラベル総数: {len(labels_b)}", f"ユニークラベル数: {len(counter_b)}"],
-            ["", "", ""],
-            ["差分サマリー:", "", ""],
-            [f"Aのみのラベル: {sum(1 for s in df['Status'] if s == 'A Only')}", 
-             f"Bのみのラベル: {sum(1 for s in df['Status'] if s == 'B Only')}", 
-             f"異なる個数のラベル: {sum(1 for s in df['Status'] if s == 'Different')}"]
-        ]
-        
+        if compare_with_coordinates:
+            # 座標比較モードの場合
+            sheet_summary = [
+                [f"ファイルA: {file_a_name}", f"ラベル総数: {len(labels_a)}", f"ユニークラベル数（座標込み）: {len(counter_a)}"],
+                [f"ファイルB: {file_b_name}", f"ラベル総数: {len(labels_b)}", f"ユニークラベル数（座標込み）: {len(counter_b)}"],
+                ["", "", ""],
+                ["差分サマリー:", "", ""],
+                [f"Aのみのラベル: {sum(1 for s in df['Status'] if s == 'A Only')}",
+                 f"Bのみのラベル: {sum(1 for s in df['Status'] if s == 'B Only')}",
+                 f"異なる個数のラベル: {sum(1 for s in df['Status'] if s == 'Different')}"]
+            ]
+            total_labels_count = len(df)
+        else:
+            # 従来モードの場合
+            sheet_summary = [
+                [f"ファイルA: {file_a_name}", f"ラベル総数: {len(labels_a)}", f"ユニークラベル数: {len(counter_a)}"],
+                [f"ファイルB: {file_b_name}", f"ラベル総数: {len(labels_b)}", f"ユニークラベル数: {len(counter_b)}"],
+                ["", "", ""],
+                ["差分サマリー:", "", ""],
+                [f"Aのみのラベル: {sum(1 for s in df['Status'] if s == 'A Only')}",
+                 f"Bのみのラベル: {sum(1 for s in df['Status'] if s == 'B Only')}",
+                 f"異なる個数のラベル: {sum(1 for s in df['Status'] if s == 'Different')}"]
+            ]
+            total_labels_count = len(all_labels)
+
         # サマリーデータを収集
         invalid_a_count = len(info_a.get('invalid_ref_designators', [])) if validate_ref_designators and filter_non_parts else 0
         invalid_b_count = len(info_b.get('invalid_ref_designators', [])) if validate_ref_designators and filter_non_parts else 0
-        
+
         summary_info = {
             'sheet_name': sheet_name,
             'file_a_base': file_a_base,
@@ -192,7 +278,7 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
             'a_only_count': sum(1 for s in df['Status'] if s == 'A Only'),
             'b_only_count': sum(1 for s in df['Status'] if s == 'B Only'),
             'different_count': sum(1 for s in df['Status'] if s == 'Different'),
-            'total_labels': len(all_labels),
+            'total_labels': total_labels_count,
             'invalid_a_count': invalid_a_count,
             'invalid_b_count': invalid_b_count
         }
