@@ -18,6 +18,21 @@ st.set_page_config(
     layout="wide",
 )
 
+CONFIG_FILE = Path(current_dir) / "config.txt"
+
+
+def load_default_prefixes():
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            lines = [line.rstrip('\n') for line in f]
+        return [line for line in lines if line.strip()]
+    return []
+
+
+DEFAULT_PREFIXES = load_default_prefixes()
+
+UNCHANGED_FILENAME = "unchanged_labels.xlsx"
+
 def generate_output_filename(file_pairs):
     """
     出力ファイル名を生成: 固定ファイル名を返す
@@ -67,6 +82,8 @@ def app():
     
     # 各ペアの入力フォーム
     file_pairs_valid = []
+    if 'prefix_text_input' not in st.session_state:
+        st.session_state.prefix_text_input = "\n".join(DEFAULT_PREFIXES)
     
     for i in range(5):  # 最大5ペア
         with st.expander(f"ファイルペア {i+1}", expanded=i==0):
@@ -149,9 +166,29 @@ def app():
                      "\n座標比較精度で指定した範囲内であれば同じ座標として扱われます。"
             )
 
-            # 座標比較精度の設定（座標比較が有効な場合のみ表示）
+            detect_label_changes = st.checkbox(
+                "ラベル変更ペアを抽出",
+                value=False,
+                help="座標が近いラベル同士を対応付け、名称が変更された候補を抽出します。"
+                     "\n例: 片側だけ存在する場合はもう一方が空欄になります。"
+                     "\n座標差の許容範囲は下の精度設定で指定し、結果は Label A 順にソートされます。"
+            )
+
+            if detect_label_changes:
+                prefix_text = st.text_area(
+                    "未変更ラベル抽出用プレフィックス（1行につき1件）",
+                    value=st.session_state.prefix_text_input,
+                    help="config.txt に定義された初期値を表示します。"
+                         "\nここで編集すると今回の処理にのみ適用されます。"
+                         "\n空行を除いた各行の文字列を接頭辞として一致するラベルを抽出します。",
+                    height=150,
+                    key="prefix_text_area"
+                )
+                st.session_state.prefix_text_input = prefix_text
+
+            # 座標比較精度の設定（座標比較またはラベル変更抽出が有効な場合に表示）
             coordinate_tolerance = 0.01
-            if compare_with_coordinates:
+            if compare_with_coordinates or detect_label_changes:
                 coordinate_tolerance = st.number_input(
                     "座標比較精度",
                     min_value=0.0001,
@@ -162,7 +199,15 @@ def app():
                     help="座標の許容誤差を指定します。"
                          "\nこの値の範囲内であれば同じ座標として扱われます。"
                          "\n例：0.01の場合、座標差が0.01以内なら同じとみなされます。"
+                         "\nラベル変更ペア抽出時も同じ精度が適用されます。"
                 )
+            if detect_label_changes:
+                prefix_list = [
+                    line.strip() for line in st.session_state.prefix_text_input.splitlines()
+                    if line.strip()
+                ]
+            else:
+                prefix_list = []
         
         with col2:
             sort_option = st.selectbox(
@@ -203,24 +248,30 @@ def app():
                         temp_files_to_cleanup.extend([temp_file_a, temp_file_b])
                     
                     # Excel出力を生成
-                    excel_data = compare_labels_multi(
+                    excel_data, unchanged_excel = compare_labels_multi(
                         temp_file_pairs,
                         filter_non_parts=filter_option,
                         sort_order=sort_value,
                         validate_ref_designators=validate_ref_designators,
                         compare_with_coordinates=compare_with_coordinates,
-                        coordinate_tolerance=coordinate_tolerance
+                        coordinate_tolerance=coordinate_tolerance,
+                        detect_label_changes=detect_label_changes,
+                        unchanged_prefixes=prefix_list,
+                        return_unchanged=True
                     )
 
                     # 結果をセッション状態に保存
                     st.session_state.excel_result = excel_data
+                    st.session_state.unchanged_excel_result = unchanged_excel if detect_label_changes else None
                     st.session_state.output_filename = output_filename
                     st.session_state.processing_settings = {
                         'filter_option': filter_option,
                         'validate_ref_designators': validate_ref_designators,
                         'sort_order': sort_value,
                         'compare_with_coordinates': compare_with_coordinates,
-                        'coordinate_tolerance': coordinate_tolerance
+                        'coordinate_tolerance': coordinate_tolerance,
+                        'detect_label_changes': detect_label_changes,
+                        'unchanged_prefixes': prefix_list
                     }
                     
                 # 一時ファイルの削除
@@ -249,6 +300,12 @@ def app():
             if settings.get('compare_with_coordinates'):
                 tolerance = settings.get('coordinate_tolerance', 0.01)
                 option_info.append(f"座標も含めて比較: 有効（精度: {tolerance:.4f}）")
+            if settings.get('detect_label_changes'):
+                tolerance = settings.get('coordinate_tolerance', 0.01)
+                option_info.append(f"ラベル変更ペア抽出: 有効（許容差: {tolerance:.4f}）")
+                prefixes = settings.get('unchanged_prefixes') or []
+                if prefixes:
+                    option_info.append(f"未変更ラベルプレフィックス: {', '.join(prefixes)}")
             sort_labels = {'asc': '昇順', 'desc': '降順', 'none': 'なし'}
             option_info.append(f"並び替え: {sort_labels.get(settings.get('sort_order', 'asc'))}")
 
@@ -256,7 +313,7 @@ def app():
                 st.info("処理オプション: " + " | ".join(option_info))
             
             # ダウンロードボタンの表示
-            st.subheader("📥 結果のダウンロード")
+            st.subheader("結果のダウンロード")
             col1, col2 = st.columns([3, 1])
             
             with col1:
@@ -269,11 +326,22 @@ def app():
                     file_name=st.session_state.output_filename,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
+            if settings.get('detect_label_changes') and settings.get('unchanged_prefixes'):
+                if st.session_state.get('unchanged_excel_result'):
+                    st.download_button(
+                        label="未変更ラベルExcelをダウンロード",
+                        data=st.session_state.unchanged_excel_result,
+                        file_name=UNCHANGED_FILENAME,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.info("未変更ラベル抽出条件に一致するラベルはありませんでした。")
             
             # 新しい比較を開始するボタン
             if st.button("🔄 新しい比較を開始", key="restart_button"):
                 # セッション状態をクリアして新しい比較を開始
-                for key in ['excel_result', 'output_filename', 'processing_settings']:
+                for key in ['excel_result', 'output_filename', 'processing_settings', 'unchanged_excel_result']:
                     if key in st.session_state:
                         del st.session_state[key]
                 st.rerun()

@@ -10,11 +10,16 @@ from .extract_labels import extract_labels
 from .coordinate_comparison import (
     round_labels_with_coordinates,
     aggregate_by_label,
-    create_data_rows_from_summary
+    create_data_rows_from_summary,
+    group_labels_by_coordinate,
+    find_label_change_pairs,
+    build_label_change_rows
 )
 
 
-def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", validate_ref_designators=False, compare_with_coordinates=False, coordinate_tolerance=0.01):
+def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", validate_ref_designators=False,
+                         compare_with_coordinates=False, coordinate_tolerance=0.01, detect_label_changes=False,
+                         unchanged_prefixes=None, return_unchanged=False):
     """
     複数のDXFファイルペアのラベル比較結果をExcelとして出力する
 
@@ -28,34 +33,55 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
         validate_ref_designators: 回路記号の妥当性をチェックするかどうか
         compare_with_coordinates: 座標も含めて比較するかどうか
         coordinate_tolerance: 座標比較の許容誤差（デフォルト: 0.01）
+        detect_label_changes: 座標に基づいてラベル変更ペアを抽出するかどうか
+        unchanged_prefixes: 未変更ラベル抽出用のプレフィックスリスト
+        return_unchanged: True の場合、未変更ラベルのExcelも併せて返す
 
     Returns:
-        bytes: 生成されたExcelファイルのバイナリデータ
+        bytes または tuple: return_unchanged=True の場合 (比較Excel, 未変更Excel)、
+            それ以外は比較Excelのみ
     """
     # Excelファイルを作成するためのライターオブジェクト
     output = io.BytesIO()
     writer = pd.ExcelWriter(output, engine='xlsxwriter')
     
-    # サマリーデータを格納するリスト
-    summary_data = []
-    
+    unchanged_prefixes = [p for p in (unchanged_prefixes or []) if p]
+    collect_unchanged = bool(detect_label_changes and unchanged_prefixes and return_unchanged)
+    unchanged_results = {prefix: [] for prefix in unchanged_prefixes} if collect_unchanged else {}
+
     # 各ペアを処理
     for idx, (file_a, file_b, temp_file_a, temp_file_b, pair_name) in enumerate(file_pairs):
+        needs_coordinates = compare_with_coordinates or detect_label_changes
+
         # ラベルを抽出（extract_labelsを再利用）- 一時ファイルパスを使用
-        labels_a, info_a = extract_labels(
+        labels_a_data, info_a = extract_labels(
             temp_file_a,
             filter_non_parts=filter_non_parts,
             sort_order=sort_order,
             validate_ref_designators=validate_ref_designators,
-            include_coordinates=compare_with_coordinates
+            include_coordinates=needs_coordinates
         )
-        labels_b, info_b = extract_labels(
+        labels_b_data, info_b = extract_labels(
             temp_file_b,
             filter_non_parts=filter_non_parts,
             sort_order=sort_order,
             validate_ref_designators=validate_ref_designators,
-            include_coordinates=compare_with_coordinates
+            include_coordinates=needs_coordinates
         )
+
+        labels_a_coords = labels_a_data if needs_coordinates else None
+        labels_b_coords = labels_b_data if needs_coordinates else None
+
+        if compare_with_coordinates:
+            labels_a = labels_a_coords
+            labels_b = labels_b_coords
+        else:
+            if needs_coordinates:
+                labels_a = [label for label, _, _ in labels_a_coords]
+                labels_b = [label for label, _, _ in labels_b_coords]
+            else:
+                labels_a = labels_a_data
+                labels_b = labels_b_data
         
         # 元のアップロードファイル名を使用（UploadedFileオブジェクトから）
         file_a_base = os.path.splitext(file_a.name)[0]
@@ -71,20 +97,45 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
             # ファイル名からシート名を生成
             sheet_name = f"Pair{idx+1}"[:31]
 
+        rounded_labels_a = rounded_labels_b = None
+        label_summary = None
+        if needs_coordinates:
+            rounded_labels_a = round_labels_with_coordinates(labels_a_coords, coordinate_tolerance)
+            rounded_labels_b = round_labels_with_coordinates(labels_b_coords, coordinate_tolerance)
+            counter_a_with_coords = Counter(rounded_labels_a)
+            counter_b_with_coords = Counter(rounded_labels_b)
+            label_summary = aggregate_by_label(counter_a_with_coords, counter_b_with_coords)
+        label_change_rows = []
+        if detect_label_changes and needs_coordinates:
+            grouped_a = group_labels_by_coordinate(rounded_labels_a)
+            grouped_b = group_labels_by_coordinate(rounded_labels_b)
+            change_pairs = find_label_change_pairs(grouped_a, grouped_b)
+            label_change_rows = build_label_change_rows(change_pairs)
+
+        if collect_unchanged and label_summary:
+            unchanged_counts = {
+                label: summary['common']
+                for label, summary in label_summary.items()
+                if summary['a_only'] == 0 and summary['b_only'] == 0 and summary['common'] > 0
+            }
+            if unchanged_counts:
+                for prefix in unchanged_prefixes:
+                    matching = [
+                        {
+                            'Pair': sheet_name,
+                            'Label': label,
+                            'Count': count
+                        }
+                        for label, count in unchanged_counts.items()
+                        if label.startswith(prefix)
+                    ]
+                    if matching:
+                        unchanged_results[prefix].extend(sorted(matching, key=lambda x: x['Label']))
+
         # 座標比較モードと従来モードで処理を分岐
         if compare_with_coordinates:
             # 座標比較モード：(ラベル, X, Y)のタプルをキーとして比較
             # Use coordinate_comparison utilities
-            rounded_labels_a = round_labels_with_coordinates(labels_a, coordinate_tolerance)
-            rounded_labels_b = round_labels_with_coordinates(labels_b, coordinate_tolerance)
-
-            # 出現回数をカウント（座標込み）
-            counter_a = Counter(rounded_labels_a)
-            counter_b = Counter(rounded_labels_b)
-
-            # Aggregate by label name using utility function
-            label_summary = aggregate_by_label(counter_a, counter_b)
-
             # Create data rows using utility function
             data_rows = create_data_rows_from_summary(label_summary)
 
@@ -208,112 +259,53 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
                 # ヘッダー行の書式を設定
                 for col_num, value in enumerate(validation_df.columns.values):
                     validation_worksheet.write(0, col_num, value, format_header)
+
+        # ラベル変更ペアのシートを追加
+        if detect_label_changes:
+            change_sheet_name = f"{sheet_name}_Changes"[:31]
+            change_columns = ['Coordinate X', 'Coordinate Y', 'Label A', 'Label B']
+            if label_change_rows:
+                change_df = pd.DataFrame(label_change_rows)
+                change_df = change_df.sort_values(['Label A', 'Label B']).reset_index(drop=True)
+            else:
+                change_df = pd.DataFrame(columns=change_columns)
+
+            change_df.to_excel(writer, sheet_name=change_sheet_name, index=False)
+            change_worksheet = writer.sheets[change_sheet_name]
+            change_worksheet.set_column('A:B', 12)
+            change_worksheet.set_column('C:D', 20)
+
+            for col_num, value in enumerate(change_df.columns.values):
+                change_worksheet.write(0, col_num, value, format_header)
+            change_worksheet.freeze_panes(1, 0)
         
-        # 個別シートにサマリー情報を追加
-        if compare_with_coordinates:
-            # 座標比較モードの場合
-            # ユニークなラベル名の数を計算
-            unique_labels_a = len(set([label for label, x, y in labels_a]))
-            unique_labels_b = len(set([label for label, x, y in labels_b]))
-
-            sheet_summary = [
-                [f"ファイルA: {file_a_name}", f"ラベル総数: {len(labels_a)}", f"ユニークラベル名数: {unique_labels_a}"],
-                [f"ファイルB: {file_b_name}", f"ラベル総数: {len(labels_b)}", f"ユニークラベル名数: {unique_labels_b}"],
-                ["", "", ""],
-                ["差分サマリー:", "", ""],
-                [f"Aのみのラベル: {sum(1 for s in df['Status'] if s == 'A Only')}",
-                 f"Bのみのラベル: {sum(1 for s in df['Status'] if s == 'B Only')}",
-                 f"完全一致のラベル: {sum(1 for s in df['Status'] if s == 'Same')}"]
-            ]
-            total_labels_count = len(df)
-        else:
-            # 従来モードの場合
-            sheet_summary = [
-                [f"ファイルA: {file_a_name}", f"ラベル総数: {len(labels_a)}", f"ユニークラベル数: {len(counter_a)}"],
-                [f"ファイルB: {file_b_name}", f"ラベル総数: {len(labels_b)}", f"ユニークラベル数: {len(counter_b)}"],
-                ["", "", ""],
-                ["差分サマリー:", "", ""],
-                [f"Aのみのラベル: {sum(1 for s in df['Status'] if s == 'A Only')}",
-                 f"Bのみのラベル: {sum(1 for s in df['Status'] if s == 'B Only')}",
-                 f"異なる個数のラベル: {sum(1 for s in df['Status'] if s == 'Different')}"]
-            ]
-            total_labels_count = len(all_labels)
-
-        # サマリーデータを収集
-        invalid_a_count = len(info_a.get('invalid_ref_designators', [])) if validate_ref_designators and filter_non_parts else 0
-        invalid_b_count = len(info_b.get('invalid_ref_designators', [])) if validate_ref_designators and filter_non_parts else 0
-
-        summary_info = {
-            'sheet_name': sheet_name,
-            'file_a_base': file_a_base,
-            'file_b_base': file_b_base,
-            'a_only_count': sum(1 for s in df['Status'] if s == 'A Only'),
-            'b_only_count': sum(1 for s in df['Status'] if s == 'B Only'),
-            'different_count': sum(1 for s in df['Status'] if s == 'Different'),
-            'total_labels': total_labels_count,
-            'invalid_a_count': invalid_a_count,
-            'invalid_b_count': invalid_b_count
-        }
-        summary_data.append(summary_info)
-    
-    # サマリーシートを最後に作成
-    workbook = writer.book
-    summary_sheet = workbook.add_worksheet("Summary")
-    writer.sheets["Summary"] = summary_sheet
-    
-    # サマリーシートのタイトル
-    title_format = workbook.add_format({
-        'bold': True,
-        'font_size': 14,
-        'align': 'center',
-        'valign': 'vcenter'
-    })
-    summary_sheet.merge_range('A1:C1', 'ラベル差分比較サマリー', title_format)
-    
-    # ヘッダー行を作成
-    summary_row = 2
-    pair_header_format = workbook.add_format({
-        'bold': True,
-        'bg_color': '#4472C4',
-        'font_color': 'white'
-    })
-    summary_sheet.write(summary_row, 0, "シート名", pair_header_format)
-    summary_sheet.write(summary_row, 1, "ファイルA", pair_header_format)
-    summary_sheet.write(summary_row, 2, "ファイルB", pair_header_format)
-    summary_sheet.write(summary_row, 3, "Aのみ", pair_header_format)
-    summary_sheet.write(summary_row, 4, "Bのみ", pair_header_format)
-    summary_sheet.write(summary_row, 5, "異なる個数", pair_header_format)
-    summary_sheet.write(summary_row, 6, "ラベル総数", pair_header_format)
-    
-    # 妥当性チェックが有効な場合は追加の列
-    if validate_ref_designators and filter_non_parts:
-        summary_sheet.write(summary_row, 7, "適合しないA", pair_header_format)
-        summary_sheet.write(summary_row, 8, "適合しないB", pair_header_format)
-    
-    summary_row += 1
-    
-    # 各ペアの情報を追加
-    for idx, info in enumerate(summary_data):
-        summary_sheet.write(idx + 3, 0, info['sheet_name'])
-        summary_sheet.write(idx + 3, 1, info['file_a_base'])
-        summary_sheet.write(idx + 3, 2, info['file_b_base'])
-        summary_sheet.write(idx + 3, 3, info['a_only_count'])
-        summary_sheet.write(idx + 3, 4, info['b_only_count'])
-        summary_sheet.write(idx + 3, 5, info['different_count'])
-        summary_sheet.write(idx + 3, 6, info['total_labels'])
-        
-        # 妥当性チェック結果をサマリーに追加
-        if validate_ref_designators and filter_non_parts:
-            summary_sheet.write(idx + 3, 7, info['invalid_a_count'])
-            summary_sheet.write(idx + 3, 8, info['invalid_b_count'])
-    
-    # 列幅を調整
-    summary_sheet.set_column('A:A', 15)  # シート名
-    summary_sheet.set_column('B:C', 20)  # ファイル名
-    summary_sheet.set_column('D:I', 12)  # 数値列
-    
     # Excelファイルを保存
     writer.close()
     output.seek(0)
+    main_excel = output.getvalue()
+
+    unchanged_output = None
+    if collect_unchanged:
+        unchanged_output = io.BytesIO()
+        unchanged_writer = pd.ExcelWriter(unchanged_output, engine='xlsxwriter')
+        for prefix in unchanged_prefixes:
+            rows = unchanged_results.get(prefix, [])
+            if rows:
+                df = pd.DataFrame(rows).sort_values(['Label', 'Pair']).reset_index(drop=True)
+            else:
+                df = pd.DataFrame(columns=['Pair', 'Label', 'Count'])
+            sheet_name = prefix[:31]
+            if not sheet_name:
+                sheet_name = "Prefix"
+            df.to_excel(unchanged_writer, sheet_name=sheet_name, index=False)
+            worksheet = unchanged_writer.sheets[sheet_name]
+            worksheet.set_column('A:A', 20)
+            worksheet.set_column('B:B', 30)
+            worksheet.set_column('C:C', 10)
+        unchanged_writer.close()
+        unchanged_output.seek(0)
+        unchanged_output = unchanged_output.getvalue()
     
-    return output.getvalue()
+    if return_unchanged:
+        return main_excel, unchanged_output
+    return main_excel

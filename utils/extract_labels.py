@@ -71,7 +71,7 @@ def clean_mtext_format_codes(text: str, debug=False) -> str:
     cleaned = re.sub(r'\\T[^;]*;', '', cleaned)
     
     # その他の制御コード（文字;形式）を除去
-    # ただし、\\Pは保持する（テキスト構造として重要）
+    # ただし、\\Pはスペースとして扱うため一旦保持
     cleaned = re.sub(r'\\(?!P)[^\\;]*;', '', cleaned)
     
     # スペース制御 \~ を通常のスペースに変換
@@ -85,7 +85,9 @@ def clean_mtext_format_codes(text: str, debug=False) -> str:
     # 複数の空白を単一の空白に変換
     cleaned = re.sub(r' +', ' ', cleaned)
     
-    result = cleaned.strip()
+    # 残った段落コード \P をスペースに変換し、ギャップを整形
+    cleaned = cleaned.replace('\\P', ' ')
+    result = re.sub(r'\s+', ' ', cleaned).strip()
     
     if debug:
         print(f"MTEXT cleaning: '{text}' -> '{result}'")
