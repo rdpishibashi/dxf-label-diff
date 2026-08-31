@@ -192,7 +192,7 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
             'bg_color': '#D9E1F2'
         })
         
-        format_a_only = workbook.add_format({'bg_color': '#FFC7CE'})  # 淡い赤
+        format_a_only = workbook.add_format({'bg_color': '#D9E1F2'})  # 淡い青
         format_b_only = workbook.add_format({'bg_color': '#C6EFCE'})  # 淡い緑
         format_different = workbook.add_format({'bg_color': '#FFEB9C'})  # 淡い黄
         
