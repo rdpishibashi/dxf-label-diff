@@ -3,6 +3,54 @@ import tempfile
 import traceback
 import re
 
+def is_invisible(e):
+    """DXFの`invisible`属性（グループコード60、1=非表示）が立っている
+    エンティティ、または**エンティティが所属するレイヤーがオフ/フリーズ
+    されている**エンティティかを返す。CADソフト上で「非表示」に設定された
+    図形（紙面には一切表示されない）は、たとえDXFファイル中に座標・テキスト
+    として存在していても収集対象にしてはならない（2026-09-16、DXF-extract-labels
+    2026-09-11・2026-09-16の横展開に伴い、DXF-label-diffは`is_invisible()`
+    自体が未実装だったため新設した。詳細はDXF-extract-labels/tests/regression/
+    test_ref_designator.pyのinvisible関連テストを参照）。
+
+    呼び出し側は次の3箇所すべてでチェックする必要がある（`virtual_entities()`
+    は親INSERTのinvisible属性を継承しないため、INSERT自身のチェックを
+    省くと、INSERT自身がinvisibleでも展開後の中身は素通りしてしまう）:
+      1. 直接配置エンティティ
+      2. INSERT自身（invisibleなINSERTは中身ごと丸ごと除外する）
+      3. `virtual_entities()`で展開した仮想エンティティ（親が可視でも
+         個々の子エンティティにinvisibleが立っている場合があるため）
+
+    レイヤー単位の非表示状態: エンティティ自身の`invisible`属性が立って
+    いなくても、そのエンティティが置かれたレイヤー自体が「オフ」または
+    「フリーズ」されていれば、画面上・印刷時ともに一切表示されない。
+    ULVAC標準の改版運用では、旧版のタイトルブロックをエンティティ単位の
+    invisible属性ではなく、専用レイヤーごとオフ/フリーズして非表示にする
+    例があり、この場合は上記の`invisible`属性チェックだけでは検出できない。
+    `virtual_entities()`で展開した仮想エンティティも`.doc`経由で元の
+    レイヤーテーブルを参照できるため、同じチェックで対応できる（`.layer`
+    属性は展開後も元のレイヤー名を保持し、親INSERTのレイヤー状態を継承
+    しない`invisible`属性とは異なる）。レイヤーテーブルに存在しない・
+    `.doc`が取得できない等の異常系は「非表示ではない」側にフォールバック
+    する（誤って全除外にならないよう保守的に扱う）。
+    """
+    if bool(e.dxf.get('invisible', 0)):
+        return True
+
+    layer_name = e.dxf.get('layer', None)
+    doc = getattr(e, 'doc', None)
+    if layer_name and doc is not None:
+        try:
+            if layer_name in doc.layers:
+                layer = doc.layers.get(layer_name)
+                if layer.is_off() or layer.is_frozen():
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
 def save_uploadedfile(uploadedfile):
     """アップロードされたファイルを一時ディレクトリに保存する"""
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploadedfile.name)[1]) as f:

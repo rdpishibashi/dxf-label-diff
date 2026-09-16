@@ -5,7 +5,7 @@ import sys
 from typing import List, Tuple, Dict, Optional
 
 # 共通ユーティリティをインポート
-from .common_utils import process_circuit_symbol_labels
+from .common_utils import process_circuit_symbol_labels, is_invisible
 
 
 def get_layers_from_dxf(dxf_file):
@@ -300,23 +300,27 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         all_entities_to_process = []
         
         # 1. MODEL_SPACEからエンティティを収集
+        # invisible属性（グループコード60）が立っている、またはエンティティが
+        # 置かれたレイヤー自体がオフ/フリーズされているエンティティは、たとえ
+        # DXFファイル中に存在していても図面上には表示されないため除外する
+        # （is_invisible()のdocstring参照）。
         msp = doc.modelspace()
         for e in msp:
-            if e.dxftype() in ['TEXT', 'MTEXT']:
+            if e.dxftype() in ['TEXT', 'MTEXT'] and not is_invisible(e):
                 all_entities_to_process.append(e)
-        
+
         # 2. BLOCKSから直接は収集しない - INSERT経由でのみ処理する
-        
+
         # 3. PAPER_SPACEからエンティティを収集
         try:
             for layout in doc.layouts:
                 if layout.name != 'Model':  # Model space以外のレイアウト
                     for e in layout:
-                        if e.dxftype() in ['TEXT', 'MTEXT']:
+                        if e.dxftype() in ['TEXT', 'MTEXT'] and not is_invisible(e):
                             all_entities_to_process.append(e)
         except Exception as e:
             pass
-        
+
         # 4. INSERT エンティティを処理してブロック参照を展開
         try:
             # INSERT エンティティを処理（MODEL_SPACE）
@@ -324,10 +328,16 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
                 if e.dxftype() == 'INSERT':
                     # INSERT エンティティのレイヤーをチェック
                     if e.dxf.layer in selected_layers:
+                        # INSERT自身がinvisible（またはoff/frozenレイヤー上）
+                        # なら、中身ごと丸ごと除外する（virtual_entities()は
+                        # 親INSERTのinvisible属性を継承しないため、ここで
+                        # チェックしないと中身が素通りしてしまう）。
+                        if is_invisible(e):
+                            continue
                         # virtual_entities()を使ってINSERTを展開（座標変換済み）
                         try:
                             for virtual_entity in e.virtual_entities():
-                                if virtual_entity.dxftype() in ['TEXT', 'MTEXT']:
+                                if virtual_entity.dxftype() in ['TEXT', 'MTEXT'] and not is_invisible(virtual_entity):
                                     all_entities_to_process.append(virtual_entity)
                         except Exception:
                             pass  # 展開できない場合は無視
@@ -338,9 +348,11 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
                     for e in layout:
                         if e.dxftype() == 'INSERT':
                             if e.dxf.layer in selected_layers:
+                                if is_invisible(e):
+                                    continue
                                 try:
                                     for virtual_entity in e.virtual_entities():
-                                        if virtual_entity.dxftype() in ['TEXT', 'MTEXT']:
+                                        if virtual_entity.dxftype() in ['TEXT', 'MTEXT'] and not is_invisible(virtual_entity):
                                             all_entities_to_process.append(virtual_entity)
                                 except Exception:
                                     pass
