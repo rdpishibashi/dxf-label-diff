@@ -393,7 +393,64 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         
         # 総抽出数を記録
         info["total_extracted"] = len(labels)
-        
+
+        # フォールバック（2026-09-23追加）: 表示中のエンティティだけでは図番候補が
+        # 1件も見つからない場合に限り、レイヤーoff/frozenを無視して
+        # （＝エンティティ自身のinvisible属性のみで）図番候補を探し直す。
+        # 唯一のタイトルブロックがoff/frozenレイヤーに置かれている図面
+        # （EE5322-455-02A.dxf/-18A.dxf。DXF-extract-labelsで発覚した回帰と
+        # 同じ原因）で図番が一切取れなくなる問題への対応。出力ラベル（labels、
+        # 上で確定済み）は変更しない——フォールバックは図番の手がかりを
+        # 見つけるためだけに使う（common_utils.is_invisibleのdocstring、
+        # Tools/CLAUDE.md参照）。
+        if extract_drawing_numbers_option and not drawing_number_candidates:
+            fallback_entities = []
+            for e in msp:
+                if e.dxftype() in ['TEXT', 'MTEXT'] and not is_invisible(e, check_layer=False):
+                    fallback_entities.append(e)
+            try:
+                for layout in doc.layouts:
+                    if layout.name != 'Model':
+                        for e in layout:
+                            if e.dxftype() in ['TEXT', 'MTEXT'] and not is_invisible(e, check_layer=False):
+                                fallback_entities.append(e)
+            except Exception:
+                pass
+            try:
+                for e in msp:
+                    if e.dxftype() == 'INSERT' and e.dxf.layer in selected_layers:
+                        if is_invisible(e, check_layer=False):
+                            continue
+                        try:
+                            for virtual_entity in e.virtual_entities():
+                                if (virtual_entity.dxftype() in ['TEXT', 'MTEXT']
+                                        and not is_invisible(virtual_entity, check_layer=False)):
+                                    fallback_entities.append(virtual_entity)
+                        except Exception:
+                            pass
+                for layout in doc.layouts:
+                    if layout.name != 'Model':
+                        for e in layout:
+                            if e.dxftype() == 'INSERT' and e.dxf.layer in selected_layers:
+                                if is_invisible(e, check_layer=False):
+                                    continue
+                                try:
+                                    for virtual_entity in e.virtual_entities():
+                                        if (virtual_entity.dxftype() in ['TEXT', 'MTEXT']
+                                                and not is_invisible(virtual_entity, check_layer=False)):
+                                            fallback_entities.append(virtual_entity)
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+
+            for e in fallback_entities:
+                if e.dxf.layer in selected_layers:
+                    _, fallback_clean_text, fallback_coordinates = extract_text_from_entity(e, debug)
+                    if fallback_clean_text:
+                        for dn in extract_drawing_numbers(fallback_clean_text, debug):
+                            drawing_number_candidates.append((dn, fallback_coordinates))
+
         # 図面番号の判別
         if extract_drawing_numbers_option and drawing_number_candidates:
             drawing_info = determine_drawing_number_types(drawing_number_candidates)
