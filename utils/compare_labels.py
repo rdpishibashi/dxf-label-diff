@@ -17,6 +17,25 @@ from .coordinate_comparison import (
 )
 
 
+# Status列の値 -> 行の色（全区分が淡色。HostPL-comparer・DXF-label-comparison と同じ配色セット）
+STATUS_COLORS = {
+    'A Only': {'bg_color': '#FEF1F5', 'font_color': '#9C0006'},    # 薄いピンク
+    'B Only': {'bg_color': '#EAF1FB', 'font_color': '#1F4E79'},    # 薄い青
+    'Different': {'bg_color': '#FFF6D5', 'font_color': '#9C6500'},  # 薄い黄
+    'Same': {'bg_color': '#EAF7EC', 'font_color': '#006100'},      # 薄い緑
+}
+
+
+def apply_status_conditional_formats(workbook, worksheet, n_data_rows, n_columns, status_col='D'):
+    """データ行全体に、Status列（既定はD列）の値に応じた条件付き書式を適用する。"""
+    for status, color in STATUS_COLORS.items():
+        worksheet.conditional_format(1, 0, n_data_rows, n_columns - 1, {
+            'type': 'formula',
+            'criteria': f'=${status_col}2="{status}"',
+            'format': workbook.add_format(color),
+        })
+
+
 def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", validate_ref_designators=False,
                          compare_with_coordinates=False, coordinate_tolerance=0.01, detect_label_changes=False,
                          unchanged_prefixes=None, return_unchanged=False):
@@ -192,10 +211,6 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
             'bg_color': '#D9E1F2'
         })
         
-        format_a_only = workbook.add_format({'bg_color': '#D9E1F2'})  # 淡い青
-        format_b_only = workbook.add_format({'bg_color': '#C6EFCE'})  # 淡い緑
-        format_different = workbook.add_format({'bg_color': '#FFEB9C'})  # 淡い黄
-        
         # 列の幅を調整
         worksheet.set_column('A:A', 25)  # ラベル列
         worksheet.set_column('B:C', 15)  # ファイル列
@@ -206,27 +221,8 @@ def compare_labels_multi(file_pairs, filter_non_parts=False, sort_order="asc", v
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, format_header)
         
-        # 条件付き書式の適用
-        # 'Status'列が'A Only'の場合、行全体を淡い赤で表示
-        # 'Status'列が'B Only'の場合、行全体を淡い緑で表示
-        # 'Status'列が'Different'の場合、行全体を淡い黄で表示
-        worksheet.conditional_format(1, 0, len(df), len(df.columns)-1, {
-            'type': 'formula',
-            'criteria': '=$D2="A Only"',
-            'format': format_a_only
-        })
-        
-        worksheet.conditional_format(1, 0, len(df), len(df.columns)-1, {
-            'type': 'formula',
-            'criteria': '=$D2="B Only"',
-            'format': format_b_only
-        })
-        
-        worksheet.conditional_format(1, 0, len(df), len(df.columns)-1, {
-            'type': 'formula',
-            'criteria': '=$D2="Different"',
-            'format': format_different
-        })
+        # 条件付き書式の適用（Status列の値で行全体を色分け）
+        apply_status_conditional_formats(workbook, worksheet, len(df), len(df.columns))
         
         # ヘッダー行を固定
         worksheet.freeze_panes(1, 0)
