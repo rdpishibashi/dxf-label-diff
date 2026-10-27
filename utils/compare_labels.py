@@ -17,7 +17,7 @@ from .coordinate_comparison import (
 )
 
 
-# Status列の値 -> 行の色（全区分が淡色。HostPL-comparer・DXF-label-comparison と同じ配色セット）
+# Status列の値 -> 行の色（全区分が淡色。HostPL-comparer・DXF-cross-checker と同じ配色セット）
 STATUS_COLORS = {
     'A Only': {'bg_color': '#FEF1F5', 'font_color': '#9C0006'},    # 薄いピンク
     'B Only': {'bg_color': '#EAF1FB', 'font_color': '#1F4E79'},    # 薄い青

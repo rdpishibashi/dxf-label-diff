@@ -2,7 +2,7 @@
 このテストが守るもの: ラベル比較Excelの行が、Status列（A Only／B Only／Different／Same）
 の値ごとに全区分淡色の配色セット（ピンク／青／黄／緑）で色分けされること。
 
-受入条件（2026-10-14、ユーザー指定。HostPL-comparer・DXF-label-comparison と同じ配色）:
+受入条件（2026-10-14、ユーザー指定。HostPL-comparer・DXF-cross-checker と同じ配色）:
     A Only=薄いピンク／B Only=薄い青／Different=薄い黄／Same=薄い緑。
     従来はSame行に書式が無く（無色）、A Onlyが青・B Onlyが緑だった。
 """
